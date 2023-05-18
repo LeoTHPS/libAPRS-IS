@@ -112,7 +112,7 @@ namespace APRS
 			{
 				.ToCall   = tocall,
 				.Sender   = sender,
-				.Content  = AL::String::Format(":%s:%s", Destination.GetCString(), Content.GetCString()),
+				.Content  = AL::String::Format(":%-09s:%s", Destination.GetCString(), Content.GetCString()),
 				.DigiPath = digipath
 			};
 
