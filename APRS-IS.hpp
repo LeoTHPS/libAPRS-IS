@@ -136,11 +136,10 @@ namespace APRS
 				return false;
 			}
 
-			auto content     = AL::Move(matches[2]);
-
+			auto content        = AL::Move(matches[2]);
 			message.Destination = AL::Move(matches[1]);
 
-			if (!AL::Regex::Match(matches, "^(.*){(.+)$", content))
+			if (!AL::Regex::Match(matches, "^(.*)\\{(.+)$", content))
 			{
 				message.Ack.Clear();
 				message.Content = AL::Move(content);
