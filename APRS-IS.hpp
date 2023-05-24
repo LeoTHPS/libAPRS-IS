@@ -631,26 +631,5 @@ namespace APRS
 				}
 			}
 		};
-
-		static AL::uint16 GeneratePasscode(const AL::String& callsign)
-		{
-			AL::uint16 value = 0x73E2;
-
-			auto lpCallsign = callsign.GetCString();
-
-			for (AL::size_t i = 0; i < callsign.GetLength(); i += 2)
-			{
-				if (*lpCallsign == '-')
-				{
-
-					break;
-				}
-
-				value ^= *(lpCallsign++) << 8;
-				value ^= *(lpCallsign++);
-			}
-
-			return value & 0x7FFF;
-		}
 	}
 }
