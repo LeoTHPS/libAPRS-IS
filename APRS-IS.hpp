@@ -166,9 +166,9 @@ namespace APRS
 
 		Packet Encode(const AL::String& tocall, const AL::String& sender, const AL::String& digipath) const
 		{
-			AL::int16  latitude_hours,   longitude_hours;
-			AL::uint16 latitude_minutes, longitude_minutes;
-			AL::uint16 latitude_seconds, longitude_seconds;
+			AL::int16  latitude_hours   = 0, longitude_hours   = 0;
+			AL::uint16 latitude_minutes = 0, longitude_minutes = 0;
+			AL::uint16 latitude_seconds = 0, longitude_seconds = 0;
 
 			// TODO: math
 
@@ -238,20 +238,303 @@ namespace APRS
 
 	namespace IS
 	{
-		class TcpClient
+		namespace Connections
 		{
-			bool                    isBlocking  = false;
-			bool                    isConnected = false;
+			class IConnection
+			{
+				IConnection(IConnection&&) = delete;
+				IConnection(const IConnection&) = delete;
 
-			AL::Network::TcpSocket* lpSocket;
-			AL::String              callsign;
+			public:
+				IConnection()
+				{
+				}
+
+				virtual ~IConnection()
+				{
+				}
+
+				virtual bool IsBlocking() const = 0;
+
+				virtual bool IsConnected() const = 0;
+
+				// @throw AL::Exception
+				virtual void Connect() = 0;
+
+				virtual void Disconnect() = 0;
+
+				// @throw AL::Exception
+				virtual void SetBlocking(bool value) = 0;
+
+				// @throw AL::Exception
+				// @return false on connection closed
+				virtual bool ReadLine(AL::String& value, bool block) = 0;
+
+				// @throw AL::Exception
+				// @return false on connection closed
+				virtual bool WriteLine(const AL::String& value) = 0;
+			};
+
+			class TcpConnection
+				: public IConnection
+			{
+				AL::Network::TcpSocket  socket;
+				AL::Network::IPEndPoint remoteEP;
+
+			public:
+				explicit TcpConnection(const AL::Network::IPEndPoint& remoteEP)
+					: socket(
+						remoteEP.Host.GetFamily()
+					),
+					remoteEP(
+						remoteEP
+					)
+				{
+				}
+
+				virtual ~TcpConnection()
+				{
+					if (IsConnected())
+					{
+
+						Disconnect();
+					}
+				}
+
+				virtual bool IsBlocking() const override
+				{
+					return socket.IsBlocking();
+				}
+
+				virtual bool IsConnected() const override
+				{
+					return socket.IsConnected();
+				}
+
+				// @throw AL::Exception
+				virtual void Connect() override
+				{
+					AL_ASSERT(
+						!IsConnected(),
+						"TcpConnection already connected"
+					);
+
+					try
+					{
+						socket.Open();
+
+						try
+						{
+							if (!socket.Connect(remoteEP))
+							{
+
+								throw AL::Exception(
+									"Connection timed out"
+								);
+							}
+						}
+						catch (AL::Exception&)
+						{
+							socket.Close();
+
+							throw;
+						}
+					}
+					catch (AL::Exception& exception)
+					{
+
+						throw AL::Exception(
+							"Error connecting to %s:%u",
+							remoteEP.Host.ToString().GetCString(),
+							remoteEP.Port
+						);
+					}
+				}
+
+				virtual void Disconnect() override
+				{
+					socket.Close();
+				}
+
+				// @throw AL::Exception
+				virtual void SetBlocking(bool value) override
+				{
+					socket.SetBlocking(value);
+				}
+
+				// @throw AL::Exception
+				// @return false on connection closed
+				virtual bool ReadLine(AL::String& value, bool block) override
+				{
+					AL_ASSERT(
+						IsConnected(),
+						"TcpConnection not connected"
+					);
+
+					value.Clear();
+
+					AL::String::Char buffer[2];
+					AL::size_t       numberOfBytesReceived;
+
+					auto buffer_Update = [&buffer]()
+					{
+						if ((buffer[0] == '\r') && (buffer[1] == '\n'))
+						{
+
+							return false;
+						}
+
+						buffer[0] = buffer[1];
+
+						return true;
+					};
+
+					if (!block)
+					{
+						try
+						{
+							if (!AL::Network::SocketExtensions::TryReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
+							{
+
+								throw AL::Exception(
+									"AL::Network::TcpSocket unexpectedly closed"
+								);
+							}
+						}
+						catch (AL::Exception&)
+						{
+							Disconnect();
+
+							throw;
+						}
+
+						if (numberOfBytesReceived == 0)
+						{
+
+							return false;
+						}
+
+						value.Append(
+							buffer[1]
+						);
+
+						buffer_Update();
+					}
+
+					do
+					{
+						try
+						{
+							if (!AL::Network::SocketExtensions::ReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
+							{
+
+								throw AL::Exception(
+									"AL::Network::TcpSocket unexpectedly closed"
+								);
+							}
+						}
+						catch (AL::Exception&)
+						{
+							Disconnect();
+
+							throw;
+						}
+
+						value.Append(
+							buffer[1]
+						);
+					} while (buffer_Update());
+
+					value.Erase(
+						value.GetLength() - 2,
+						2
+					);
+
+					// AL::OS::Console::WriteLine("[RX] %s", value.GetCString());
+
+					return true;
+				}
+
+				// @throw AL::Exception
+				// @return false on connection closed
+				virtual bool WriteLine(const AL::String& value) override
+				{
+					AL_ASSERT(
+						IsConnected(),
+						"TcpConnection not connected"
+					);
+
+					auto valueLength = value.GetLength();
+
+					if (valueLength > 510)
+					{
+
+						valueLength = 510;
+					}
+
+					// AL::OS::Console::WriteLine("[TX] %s", value.SubString(0, valueLength).GetCString());
+
+					AL::size_t numberOfBytesSent;
+
+					static constexpr char EOL[] = "\r\n";
+
+					try
+					{
+						if (!AL::Network::SocketExtensions::SendAll(socket, value.GetCString(), valueLength, numberOfBytesSent) ||
+							!AL::Network::SocketExtensions::SendAll(socket, EOL, sizeof(EOL) - 1, numberOfBytesSent))
+						{
+
+							return false;
+						}
+					}
+					catch (AL::Exception&)
+					{
+						Disconnect();
+
+						throw;
+					}
+
+					return true;
+				}
+			};
+		}
+
+		typedef AL::Collections::Array<AL::String> Filter;
+
+		template<typename T_CONNECTION>
+		class Client
+		{
+			static_assert(
+				AL::Is_Base_Of<Connections::IConnection, T_CONNECTION>::Value,
+				"T_CONNECTION must inherit Connections::IConnection"
+			);
+
+			bool          isBlocking  = false;
+			bool          isConnected = false;
+
+			Filter        filter;
+			AL::String    callsign;
+			AL::uint16    passcode;
+			T_CONNECTION* lpConnection;
+
+			Client(Client&&) = delete;
+			Client(const Client&) = delete;
 
 		public:
-			TcpClient()
+			Client(AL::String&& callsign, AL::uint16 passcode, Filter&& filter)
+				: filter(
+					AL::Move(filter)
+				),
+				callsign(
+					AL::Move(callsign)
+				),
+				passcode(
+					passcode
+				)
 			{
 			}
 
-			virtual ~TcpClient()
+			virtual ~Client()
 			{
 				if (IsConnected())
 				{
@@ -270,100 +553,72 @@ namespace APRS
 				return isConnected;
 			}
 
+			auto& GetFilter() const
+			{
+				return filter;
+			}
+
 			auto& GetCallsign() const
 			{
 				return callsign;
 			}
 
 			// @throw AL::Exception
-			void Connect(const AL::Network::IPEndPoint& remoteEP, const AL::String& callsign, AL::uint16 passcode, const AL::Collections::Array<AL::String>& filter)
+			void SetBlocking(bool value)
+			{
+				isBlocking = value;
+
+				if (IsConnected())
+				{
+					lpConnection->SetBlocking(
+						value
+					);
+				}
+			}
+
+			// @throw AL::Exception
+			template<typename ... TArgs>
+			void Connect(TArgs ... args)
 			{
 				AL_ASSERT(
 					!IsConnected(),
-					"TcpClient already connected"
+					"Client already connected"
 				);
 
-				lpSocket = new AL::Network::TcpSocket(
-					remoteEP.Host.GetFamily()
+				lpConnection = new T_CONNECTION(
+					AL::Forward<TArgs>(args) ...
 				);
-
-				this->callsign = callsign;
-
-				// this only throws if the socket is already open
-				lpSocket->SetBlocking(IsBlocking());
 
 				try
 				{
-					lpSocket->Open();
-				}
-				catch (AL::Exception& exception)
-				{
-					delete lpSocket;
+					lpConnection->SetBlocking(IsBlocking());
 
-					throw AL::Exception(
-						AL::Move(exception),
-						"Error opening AL::Network::TcpSocket"
-					);
-				}
+					lpConnection->Connect();
 
-				try
-				{
-					if (!lpSocket->Connect(remoteEP))
+					if (!Authenticate())
 					{
 
 						throw AL::Exception(
-							"Connection timed out"
+							"Authentication failed"
 						);
 					}
 				}
-				catch (AL::Exception& exception)
+				catch (AL::Exception&)
 				{
-					lpSocket->Close();
+					delete lpConnection;
 
-					delete lpSocket;
-
-					throw AL::Exception(
-						AL::Move(exception),
-						"Error connecting to %s",
-						remoteEP.Host.ToString().GetCString(),
-						remoteEP.Port
-					);
+					throw;
 				}
 
 				isConnected = true;
-
-				try
-				{
-					if (!Authenticate(callsign, passcode, filter))
-					{
-
-						throw AL::Exception(
-							"Login failed"
-						);
-					}
-				}
-				catch (AL::Exception& exception)
-				{
-					isConnected = false;
-
-					lpSocket->Close();
-
-					delete lpSocket;
-
-					throw AL::Exception(
-						AL::Move(exception),
-						"Error sending authentication"
-					);
-				}
 			}
 
 			void Disconnect()
 			{
 				if (IsConnected())
 				{
-					lpSocket->Close();
-
-					delete lpSocket;
+					lpConnection->Disconnect();
+					delete lpConnection;
 
 					isConnected = false;
 				}
@@ -376,10 +631,10 @@ namespace APRS
 			{
 				AL_ASSERT(
 					IsConnected(),
-					"TcpClient not connected"
+					"Client not connected"
 				);
 
-				if (!ReadLine(line, false))
+				if (!lpConnection->ReadLine(line, false))
 				{
 
 					return -1;
@@ -404,14 +659,14 @@ namespace APRS
 			{
 				AL_ASSERT(
 					IsConnected(),
-					"TcpClient not connected"
+					"Client not connected"
 				);
 
 				line = packet.Encode();
 
 				try
 				{
-					WriteLine(
+					lpConnection->WriteLine(
 						line
 					);
 				}
@@ -426,33 +681,20 @@ namespace APRS
 				}
 			}
 
-			// @throw AL::Exception
-			void SetBlocking(bool value)
-			{
-				isBlocking = value;
-
-				if (IsConnected())
-				{
-					lpSocket->SetBlocking(
-						value
-					);
-				}
-			}
-
 		private:
 			// @throw AL::Exception
-			bool Authenticate(const AL::String& callsign, AL::uint16 passcode, const AL::Collections::Array<AL::String>& filter)
+			bool Authenticate()
 			{
-				auto line = [&callsign, passcode, &filter]()
+				auto line = [this]()
 				{
 					AL::StringBuilder sb;
-					sb << "user " << callsign << " pass " << passcode << " vers " APRS_SOFTWARE_NAME " " APRS_SOFTWARE_VERSION;
+					sb << "user " << GetCallsign() << " pass " << passcode << " vers " APRS_SOFTWARE_NAME " " APRS_SOFTWARE_VERSION;
 
-					if (filter.GetSize() != 0)
+					if (GetFilter().GetSize() != 0)
 					{
 						sb << " filter";
 
-						for (auto& f : filter)
+						for (auto& f : GetFilter())
 							sb << ' ' << f;
 					}
 
@@ -461,7 +703,7 @@ namespace APRS
 
 				try
 				{
-					WriteLine(
+					lpConnection->WriteLine(
 						line
 					);
 				}
@@ -478,7 +720,7 @@ namespace APRS
 					AL::String                 line;
 					AL::Regex::MatchCollection matches;
 
-					while (ReadLine(line, true) || !IsBlocking())
+					while (lpConnection->ReadLine(line, true) || !IsBlocking())
 					{
 						if (AL::Regex::Match(matches, "^# logresp ([^ ]+) (.+)$", line))
 						{
@@ -495,141 +737,8 @@ namespace APRS
 
 				return true;
 			}
-
-		private:
-			// @throw AL::Exception
-			// @return false if would block
-			bool ReadLine(AL::String& value, bool block)
-			{
-				AL_ASSERT(
-					IsConnected(),
-					"TcpClient not connected"
-				);
-
-				value.Clear();
-
-				AL::String::Char buffer[2];
-				AL::size_t       numberOfBytesReceived;
-
-				auto buffer_Update = [&buffer]()
-				{
-					if ((buffer[0] == '\r') && (buffer[1] == '\n'))
-					{
-
-						return false;
-					}
-
-					buffer[0] = buffer[1];
-
-					return true;
-				};
-
-				if (!block)
-				{
-					try
-					{
-						if (!AL::Network::SocketExtensions::TryReceiveAll(*lpSocket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
-						{
-
-							throw AL::Exception(
-								"AL::Network::TcpSocket unexpectedly closed"
-							);
-						}
-					}
-					catch (AL::Exception&)
-					{
-						Disconnect();
-
-						throw;
-					}
-
-					if (numberOfBytesReceived == 0)
-					{
-
-						return false;
-					}
-
-					value.Append(
-						buffer[1]
-					);
-
-					buffer_Update();
-				}
-
-				do
-				{
-					try
-					{
-						if (!AL::Network::SocketExtensions::ReceiveAll(*lpSocket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
-						{
-
-							throw AL::Exception(
-								"AL::Network::TcpSocket unexpectedly closed"
-							);
-						}
-					}
-					catch (AL::Exception&)
-					{
-						Disconnect();
-
-						throw;
-					}
-
-					value.Append(
-						buffer[1]
-					);
-				} while (buffer_Update());
-
-				value.Erase(
-					value.GetLength() - 2,
-					2
-				);
-
-				// AL::OS::Console::WriteLine("[RX] %s", value.GetCString());
-
-				return true;
-			}
-
-			// @throw AL::Exception
-			void WriteLine(const AL::String& value)
-			{
-				AL_ASSERT(
-					IsConnected(),
-					"TcpClient not connected"
-				);
-
-				auto valueLength = value.GetLength();
-
-				if (valueLength > 510)
-				{
-
-					valueLength = 510;
-				}
-
-				// AL::OS::Console::WriteLine("[TX] %s", value.SubString(0, valueLength).GetCString());
-
-				AL::size_t numberOfBytesSent;
-
-				static constexpr char EOL[] = "\r\n";
-
-				try
-				{
-					if (!AL::Network::SocketExtensions::SendAll(*lpSocket, value.GetCString(), valueLength, numberOfBytesSent) ||
-						!AL::Network::SocketExtensions::SendAll(*lpSocket, EOL, sizeof(EOL) - 1, numberOfBytesSent))
-					{
-
-						throw AL::Exception(
-							"AL::Network::TcpSocket unexpectedly closed"
-						);
-					}
-				}
-				catch (AL::Exception&)
-				{
-					Disconnect();
-
-					throw;
-				}
-			}
 		};
+
+		typedef Client<Connections::TcpConnection> TcpClient;
 	}
 }
