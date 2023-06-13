@@ -3,8 +3,6 @@
 
 #include <AL/Collections/Array.hpp>
 
-#include <AL/OS/Console.hpp>
-
 #include <AL/Network/TcpSocket.hpp>
 #include <AL/Network/SocketExtensions.hpp>
 
