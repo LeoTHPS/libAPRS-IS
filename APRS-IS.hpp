@@ -3,6 +3,8 @@
 
 #include <AL/Collections/Array.hpp>
 
+#include <AL/OS/Console.hpp>
+
 #include <AL/Network/TcpSocket.hpp>
 #include <AL/Network/SocketExtensions.hpp>
 
@@ -199,40 +201,44 @@ namespace APRS
 
 		static bool Decode(Position& position, const Packet& packet)
 		{
+			// TODO: add support for ambiguity
+			// TODO: add support for timestamp
+			// TODO: add support for compression
+
+			// COMPRESSED POSITION REPORT DATA FORMATS
+			//	https://www.aprs.org/doc/APRS101.PDF#page=46
+			// DF Report Format — without Timestamp
+			//	https://www.aprs.org/doc/APRS101.PDF#page=44
+			// Lat/Long Position Report Format — with Data Extension and Timestamp
+			//	https://www.aprs.org/doc/APRS101.PDF#page=43
+
 			AL::Regex::MatchCollection matches;
 
-			if (!AL::Regex::Match(matches, "^[!=](\\d\\d)(\\d\\d)\\.(\\d\\d)([NS])(.)(\\d\\d\\d)(\\d\\d)\\.(\\d\\d)([WE])(.)", packet.Content))
+			if (AL::Regex::Match(matches, "^[!=](\\d\\d)(\\d\\d)\\.(\\d\\d)([NS])(.)(\\d\\d\\d)(\\d\\d)\\.(\\d\\d)([WE])(.)(.*(?=\\/A=-?\\d{6}))?(\\/A=(-?\\d*))?(.*)", packet.Content))
 			{
+				auto latitude_hours       = AL::FromString<AL::int16>(matches[1]);
+				auto latitude_minutes     = AL::FromString<AL::uint16>(matches[2]);
+				auto latitude_seconds     = AL::FromString<AL::uint16>(matches[3]);
+				auto latitude_north_south = matches[4][0];
+				position.SymbolTable      = matches[5][0];
+				auto longitude_hours      = AL::FromString<AL::int16>(matches[6]);
+				auto longitude_minutes    = AL::FromString<AL::uint16>(matches[7]);
+				auto longitude_seconds    = AL::FromString<AL::uint16>(matches[8]);
+				auto longitude_west_east  = matches[9][0];
+				position.SymbolTableKey   = matches[10][0];
+				position.Altitude         = AL::FromString<AL::int16>(matches[13]);
+				position.Comment          = AL::Move(matches[14]);
 
-				return false;
+				position.Latitude  = latitude_hours + (latitude_minutes / 60.0f) + (latitude_seconds / 3600.0f);
+				position.Longitude = longitude_hours + (longitude_minutes / 60.0f) + (longitude_seconds / 3600.0f);
+
+				if (latitude_north_south == 'S') position.Latitude  = -position.Latitude;
+				if (longitude_west_east  == 'W') position.Longitude = -position.Longitude;
+
+				return true;
 			}
 
-			auto latitude_hours       = AL::FromString<AL::int16>(matches[1]);
-			auto latitude_minutes     = AL::FromString<AL::uint16>(matches[2]);
-			auto latitude_seconds     = AL::FromString<AL::uint16>(matches[3]);
-			auto latitude_north_south = matches[4][0];
-			position.SymbolTable      = matches[5][0];
-			auto longitude_hours      = AL::FromString<AL::int16>(matches[6]);
-			auto longitude_minutes    = AL::FromString<AL::uint16>(matches[7]);
-			auto longitude_seconds    = AL::FromString<AL::uint16>(matches[8]);
-			auto longitude_west_east  = matches[9][0];
-			position.SymbolTableKey   = matches[10][0];
-			position.Comment.Clear(); // TODO: implement
-
-			position.Altitude  = 0;
-			position.Latitude  = latitude_hours + (latitude_minutes / 60.0f) + (latitude_seconds / 3600.0f);
-			position.Longitude = longitude_hours + (longitude_minutes / 60.0f) + (longitude_seconds / 3600.0f);
-
-			if (latitude_north_south == 'S') position.Latitude  = -position.Latitude;
-			if (longitude_west_east  == 'W') position.Longitude = -position.Longitude;
-
-			if (AL::Regex::Match(matches, "A=(-?)0*(\\d*)", packet.Content))
-			{
-				position.Altitude = AL::FromString<AL::uint16>(matches[2]);
-				if (matches[1].GetLength() == 1) position.Altitude = -position.Altitude;
-			}
-
-			return true;
+			return false;
 		}
 	};
 
