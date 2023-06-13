@@ -212,7 +212,7 @@ namespace APRS
 
 			AL::Regex::MatchCollection matches;
 
-			if (AL::Regex::Match(matches, "^[!=](\\d\\d)(\\d\\d)\\.(\\d\\d)([NS])(.)(\\d\\d\\d)(\\d\\d)\\.(\\d\\d)([WE])(.)(.*(?=\\/A=-?\\d{6}))?(\\/A=(-?\\d*))?(.*)", packet.Content))
+			if (AL::Regex::Match(matches, "^[!=](\\d\\d)(\\d\\d)\\.(\\d\\d)([NS])(.)(\\d\\d\\d)(\\d\\d)\\.(\\d\\d)([WE])(.)(.*(?=\\/A=-?\\d{6}))?(\\/A=(-?\\d*))?(.+[^\\s]+)?\\s*$", packet.Content))
 			{
 				auto latitude_hours       = AL::FromString<AL::int16>(matches[1]);
 				auto latitude_minutes     = AL::FromString<AL::uint16>(matches[2]);
@@ -454,8 +454,6 @@ namespace APRS
 						2
 					);
 
-					// AL::OS::Console::WriteLine("[RX] %s", value.GetCString());
-
 					return true;
 				}
 
@@ -475,8 +473,6 @@ namespace APRS
 
 						valueLength = 510;
 					}
-
-					// AL::OS::Console::WriteLine("[TX] %s", value.SubString(0, valueLength).GetCString());
 
 					AL::size_t numberOfBytesSent;
 
