@@ -714,10 +714,8 @@ namespace APRS
 
 					if (GetFilter().GetSize() != 0)
 					{
-						sb << " filter";
-
-						for (auto& f : GetFilter())
-							sb << ' ' << f;
+						sb << " filter ";
+						sb << GetFilter();
 					}
 
 					return sb.ToString();
