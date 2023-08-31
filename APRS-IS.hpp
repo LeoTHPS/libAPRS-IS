@@ -499,8 +499,6 @@ namespace APRS
 			};
 		}
 
-		typedef AL::Collections::Array<AL::String> Filter;
-
 		template<typename T_CONNECTION>
 		class Client
 		{
@@ -512,16 +510,17 @@ namespace APRS
 			bool          isBlocking  = false;
 			bool          isConnected = false;
 
-			Filter        filter;
+			AL::String    filter;
 			AL::String    callsign;
 			AL::uint16    passcode;
+			AL::String    packetBuffer;
 			T_CONNECTION* lpConnection;
 
 			Client(Client&&) = delete;
 			Client(const Client&) = delete;
 
 		public:
-			Client(AL::String&& callsign, AL::uint16 passcode, Filter&& filter)
+			Client(AL::String&& callsign, AL::uint16 passcode, AL::String&& filter)
 				: filter(
 					AL::Move(filter)
 				),
@@ -625,50 +624,67 @@ namespace APRS
 			}
 
 			// @throw AL::Exception
-			// @return 0 on error
+			// @return 0 on connection closed
 			// @return -1 if would block
-			int ReadPacket(AL::String& line, Packet& packet)
+			// @return -2 on decoding error
+			int ReadPacket(Packet& packet)
 			{
 				AL_ASSERT(
 					IsConnected(),
 					"Client not connected"
 				);
 
-				if (!lpConnection->ReadLine(line, false))
+				try
+				{
+					if (!lpConnection->ReadLine(packetBuffer, false))
+					{
+						Disconnect();
+
+						return 0;
+					}
+				}
+				catch (AL::Exception& exception)
 				{
 
-					return -1;
+					throw AL::Exception(
+						AL::Move(exception),
+						"Error receiving packet buffer"
+					);
 				}
 
-				if (!Packet::Decode(packet, line))
+				if (!Packet::Decode(packet, packetBuffer))
 				{
-					if (line.StartsWith('#'))
+					if (packetBuffer.StartsWith('#'))
 					{
 
 						return -1;
 					}
 
-					return 0;
+					return -2;
 				}
 
 				return 1;
 			}
 
 			// @throw AL::Exception
-			void WritePacket(AL::String& line, const Packet& packet)
+			// @return false on connection closed
+			bool WritePacket(const Packet& packet)
 			{
 				AL_ASSERT(
 					IsConnected(),
 					"Client not connected"
 				);
 
-				line = packet.Encode();
+				packetBuffer = packet.Encode();
 
 				try
 				{
-					lpConnection->WriteLine(
-						line
-					);
+					if (!lpConnection->WriteLine(packetBuffer))
+					{
+						Disconnect();
+
+						return false;
+					}
 				}
 				catch (AL::Exception& exception)
 				{
@@ -676,9 +692,11 @@ namespace APRS
 					throw AL::Exception(
 						AL::Move(exception),
 						"Error sending Packet [Buffer: %s]",
-						line.GetCString()
+						packetBuffer.GetCString()
 					);
 				}
+
+				return true;
 			}
 
 		private:
