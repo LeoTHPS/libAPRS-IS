@@ -271,8 +271,9 @@ namespace APRS
 				virtual void SetBlocking(bool value) = 0;
 
 				// @throw AL::Exception
-				// @return false on connection closed
-				virtual bool ReadLine(AL::String& value, bool block) = 0;
+				// @return 0 on connection closed
+				// @return -1 if would block
+				virtual int ReadLine(AL::String& value, bool block) = 0;
 
 				// @throw AL::Exception
 				// @return false on connection closed
@@ -367,8 +368,9 @@ namespace APRS
 				}
 
 				// @throw AL::Exception
-				// @return false on connection closed
-				virtual bool ReadLine(AL::String& value, bool block) override
+				// @return 0 on connection closed
+				// @return -1 if would block
+				virtual int ReadLine(AL::String& value, bool block) override
 				{
 					AL_ASSERT(
 						IsConnected(),
@@ -399,10 +401,9 @@ namespace APRS
 						{
 							if (!AL::Network::SocketExtensions::TryReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
 							{
+								Disconnect();
 
-								throw AL::Exception(
-									"AL::Network::TcpSocket unexpectedly closed"
-								);
+								return 0;
 							}
 						}
 						catch (AL::Exception&)
@@ -415,7 +416,7 @@ namespace APRS
 						if (numberOfBytesReceived == 0)
 						{
 
-							return false;
+							return -1;
 						}
 
 						value.Append(
@@ -431,10 +432,9 @@ namespace APRS
 						{
 							if (!AL::Network::SocketExtensions::ReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
 							{
+								Disconnect();
 
-								throw AL::Exception(
-									"AL::Network::TcpSocket unexpectedly closed"
-								);
+								return 0;
 							}
 						}
 						catch (AL::Exception&)
@@ -454,7 +454,7 @@ namespace APRS
 						2
 					);
 
-					return true;
+					return 1;
 				}
 
 				// @throw AL::Exception
@@ -483,6 +483,7 @@ namespace APRS
 						if (!AL::Network::SocketExtensions::SendAll(socket, value.GetCString(), valueLength, numberOfBytesSent) ||
 							!AL::Network::SocketExtensions::SendAll(socket, EOL, sizeof(EOL) - 1, numberOfBytesSent))
 						{
+							Disconnect();
 
 							return false;
 						}
@@ -636,11 +637,14 @@ namespace APRS
 
 				try
 				{
-					if (!lpConnection->ReadLine(packetBuffer, false))
+					switch (lpConnection->ReadLine(packetBuffer, false))
 					{
-						Disconnect();
+						case 0:
+							Disconnect();
+							return 0;
 
-						return 0;
+						case -1:
+							return -1;
 					}
 				}
 				catch (AL::Exception& exception)
@@ -721,9 +725,11 @@ namespace APRS
 
 				try
 				{
-					lpConnection->WriteLine(
-						line
-					);
+					if (!lpConnection->WriteLine(line))
+					{
+
+						return false;
+					}
 				}
 				catch (AL::Exception& exception)
 				{
@@ -738,7 +744,7 @@ namespace APRS
 					AL::String                 line;
 					AL::Regex::MatchCollection matches;
 
-					while (lpConnection->ReadLine(line, true) || !IsBlocking())
+					while (lpConnection->ReadLine(line, true) > 0)
 					{
 						if (AL::Regex::Match(matches, "^# logresp ([^ ]+) (.+)$", line))
 						{
@@ -748,12 +754,12 @@ namespace APRS
 								return true;
 							}
 
-							return false;
+							break;
 						}
 					}
 				}
 
-				return true;
+				return false;
 			}
 		};
 
