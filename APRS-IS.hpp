@@ -963,13 +963,27 @@ namespace APRS
 				{
 					if (command.Prefix.Compare(prefix, AL::True))
 					{
+						bool is_filtered = true;
+
 						for (auto& filter : command.Filter)
 						{
 							if (filter.Compare(sender, AL::True))
 							{
+								if (command.IsFilterInverted)
+								{
+									is_filtered = false;
+
+									break;
+								}
 
 								return -2;
 							}
+						}
+
+						if (!is_filtered)
+						{
+
+							return -2;
 						}
 
 						if (!command.Handler(sender, prefix, args))
