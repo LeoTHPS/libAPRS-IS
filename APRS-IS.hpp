@@ -2,12 +2,19 @@
 #include <AL/Common.hpp>
 
 #include <AL/Collections/Array.hpp>
+#include <AL/Collections/Queue.hpp>
+#include <AL/Collections/LinkedList.hpp>
+#include <AL/Collections/Dictionary.hpp>
 
 #include <AL/Network/TcpSocket.hpp>
 #include <AL/Network/SocketExtensions.hpp>
 
+#if defined(AL_PLATFORM_WINDOWS)
+	#undef SendMessage
+#endif
+
 #define APRS_SOFTWARE_NAME    "libAPRS-IS"
-#define APRS_SOFTWARE_VERSION "0.1"
+#define APRS_SOFTWARE_VERSION "0.2"
 
 namespace APRS
 {
@@ -245,52 +252,23 @@ namespace APRS
 
 	namespace IS
 	{
-		namespace Connections
+		typedef AL::Function<void()>                                                   ClientOnMessageSentCallback;
+
+		typedef AL::EventHandler<void()>                                               ClientOnConnectEventHandler;
+		typedef AL::EventHandler<void()>                                               ClientOnDisconnectEventHandler;
+		typedef AL::EventHandler<void(const Packet& packet)>                           ClientOnReceivePacketEventHandler;
+		typedef AL::EventHandler<void(const Packet& packet, const Message& message)>   ClientOnReceiveMessageEventHandler;
+		typedef AL::EventHandler<void(const Packet& packet, const Position& position)> ClientOnReceivePositionEventHandler;
+
+		class Client
 		{
-			class IConnection
-			{
-				IConnection(IConnection&&) = delete;
-				IConnection(const IConnection&) = delete;
-
-			public:
-				IConnection()
-				{
-				}
-
-				virtual ~IConnection()
-				{
-				}
-
-				virtual bool IsBlocking() const = 0;
-
-				virtual bool IsConnected() const = 0;
-
-				// @throw AL::Exception
-				virtual void Connect() = 0;
-
-				virtual void Disconnect() = 0;
-
-				// @throw AL::Exception
-				virtual void SetBlocking(bool value) = 0;
-
-				// @throw AL::Exception
-				// @return 0 on connection closed
-				// @return -1 if would block
-				virtual int ReadLine(AL::String& value, bool block) = 0;
-
-				// @throw AL::Exception
-				// @return false on connection closed
-				virtual bool WriteLine(const AL::String& value) = 0;
-			};
-
-			class TcpConnection
-				: public IConnection
+			class Connection
 			{
 				AL::Network::TcpSocket  socket;
 				AL::Network::IPEndPoint remoteEP;
 
 			public:
-				explicit TcpConnection(const AL::Network::IPEndPoint& remoteEP)
+				explicit Connection(const AL::Network::IPEndPoint& remoteEP)
 					: socket(
 						remoteEP.Host.GetFamily()
 					),
@@ -300,31 +278,31 @@ namespace APRS
 				{
 				}
 
-				virtual ~TcpConnection()
+				virtual ~Connection()
 				{
-					if (IsConnected())
+					if (IsOpen())
 					{
 
-						Disconnect();
+						Close();
 					}
 				}
 
-				virtual bool IsBlocking() const override
+				bool IsBlocking() const
 				{
 					return socket.IsBlocking();
 				}
 
-				virtual bool IsConnected() const override
+				bool IsOpen() const
 				{
 					return socket.IsConnected();
 				}
 
 				// @throw AL::Exception
-				virtual void Connect() override
+				void Open()
 				{
 					AL_ASSERT(
-						!IsConnected(),
-						"TcpConnection already connected"
+						!IsOpen(),
+						"Connection already open"
 					);
 
 					try
@@ -359,13 +337,13 @@ namespace APRS
 					}
 				}
 
-				virtual void Disconnect() override
+				void Close()
 				{
 					socket.Close();
 				}
 
 				// @throw AL::Exception
-				virtual void SetBlocking(bool value) override
+				void SetBlocking(bool value)
 				{
 					socket.SetBlocking(value);
 				}
@@ -373,11 +351,11 @@ namespace APRS
 				// @throw AL::Exception
 				// @return 0 on connection closed
 				// @return -1 if would block
-				virtual int ReadLine(AL::String& value, bool block) override
+				int ReadLine(AL::String& value, bool block)
 				{
 					AL_ASSERT(
 						IsConnected(),
-						"TcpConnection not connected"
+						"Connection not open"
 					);
 
 					value.Clear();
@@ -404,14 +382,14 @@ namespace APRS
 						{
 							if (!AL::Network::SocketExtensions::TryReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
 							{
-								Disconnect();
+								Close();
 
 								return 0;
 							}
 						}
 						catch (AL::Exception&)
 						{
-							Disconnect();
+							Close();
 
 							throw;
 						}
@@ -435,14 +413,14 @@ namespace APRS
 						{
 							if (!AL::Network::SocketExtensions::ReceiveAll(socket, &buffer[1], sizeof(buffer[1]), numberOfBytesReceived))
 							{
-								Disconnect();
+								Close();
 
 								return 0;
 							}
 						}
 						catch (AL::Exception&)
 						{
-							Disconnect();
+							Close();
 
 							throw;
 						}
@@ -462,11 +440,11 @@ namespace APRS
 
 				// @throw AL::Exception
 				// @return false on connection closed
-				virtual bool WriteLine(const AL::String& value) override
+				bool WriteLine(const AL::String& value)
 				{
 					AL_ASSERT(
 						IsConnected(),
-						"TcpConnection not connected"
+						"Connection not open"
 					);
 
 					auto valueLength = value.GetLength();
@@ -486,14 +464,14 @@ namespace APRS
 						if (!AL::Network::SocketExtensions::SendAll(socket, value.GetCString(), valueLength, numberOfBytesSent) ||
 							!AL::Network::SocketExtensions::SendAll(socket, EOL, sizeof(EOL) - 1, numberOfBytesSent))
 						{
-							Disconnect();
+							Close();
 
 							return false;
 						}
 					}
 					catch (AL::Exception&)
 					{
-						Disconnect();
+						Close();
 
 						throw;
 					}
@@ -501,29 +479,35 @@ namespace APRS
 					return true;
 				}
 			};
-		}
 
-		template<typename T_CONNECTION>
-		class Client
-		{
-			static_assert(
-				AL::Is_Base_Of<Connections::IConnection, T_CONNECTION>::Value,
-				"T_CONNECTION must inherit Connections::IConnection"
-			);
+			typedef AL::Collections::Queue<ClientOnMessageSentCallback>               _MessageAckCallbackQueue;
+			typedef AL::Collections::Dictionary<AL::String, _MessageAckCallbackQueue> _MessageAckCallbacks;
 
-			bool          isBlocking  = false;
-			bool          isConnected = false;
+			bool                 isBlocking  = false;
+			bool                 isConnected = false;
 
-			AL::String    filter;
-			AL::String    callsign;
-			AL::uint16    passcode;
-			AL::String    packetBuffer;
-			T_CONNECTION* lpConnection;
+			AL::String           filter;
+			AL::String           callsign;
+			AL::uint16           passcode;
+			AL::String           packetBuffer;
+			Connection*          lpConnection;
+			_MessageAckCallbacks messageCallbacks;
 
 			Client(Client&&) = delete;
 			Client(const Client&) = delete;
 
 		public:
+			// @throw AL::Exception
+			AL::Event<ClientOnConnectEventHandler>         OnConnect;
+			AL::Event<ClientOnDisconnectEventHandler>      OnDisconnect;
+
+			// @throw AL::Exception
+			AL::Event<ClientOnReceivePacketEventHandler>   OnReceivePacket;
+			// @throw AL::Exception
+			AL::Event<ClientOnReceiveMessageEventHandler>  OnReceiveMessage;
+			// @throw AL::Exception
+			AL::Event<ClientOnReceivePositionEventHandler> OnReceivePosition;
+
 			Client(AL::String&& callsign, AL::uint16 passcode, AL::String&& filter)
 				: filter(
 					AL::Move(filter)
@@ -580,23 +564,22 @@ namespace APRS
 			}
 
 			// @throw AL::Exception
-			template<typename ... TArgs>
-			void Connect(TArgs ... args)
+			void Connect(const AL::Network::IPEndPoint& remoteEP)
 			{
 				AL_ASSERT(
 					!IsConnected(),
 					"Client already connected"
 				);
 
-				lpConnection = new T_CONNECTION(
-					AL::Forward<TArgs>(args) ...
+				lpConnection = new Connection(
+					remoteEP
 				);
 
 				try
 				{
 					lpConnection->SetBlocking(IsBlocking());
 
-					lpConnection->Connect();
+					lpConnection->Open();
 
 					if (!Authenticate())
 					{
@@ -614,95 +597,181 @@ namespace APRS
 				}
 
 				isConnected = true;
+
+				try
+				{
+					OnConnect.Execute();
+				}
+				catch (AL::Exception&)
+				{
+					Disconnect();
+
+					throw;
+				}
 			}
 
 			void Disconnect()
 			{
 				if (IsConnected())
 				{
-					lpConnection->Disconnect();
+					messageCallbacks.Clear();
+
+					lpConnection->Close();
 					delete lpConnection;
 
 					isConnected = false;
+
+					OnDisconnect.Execute();
 				}
-			}
-
-			// @throw AL::Exception
-			// @return 0 on connection closed
-			// @return -1 if would block
-			// @return -2 on decoding error
-			int ReadPacket(Packet& packet)
-			{
-				AL_ASSERT(
-					IsConnected(),
-					"Client not connected"
-				);
-
-				try
-				{
-					switch (lpConnection->ReadLine(packetBuffer, false))
-					{
-						case 0:
-							Disconnect();
-							return 0;
-
-						case -1:
-							return -1;
-					}
-				}
-				catch (AL::Exception& exception)
-				{
-
-					throw AL::Exception(
-						AL::Move(exception),
-						"Error receiving packet buffer"
-					);
-				}
-
-				if (!Packet::Decode(packet, packetBuffer))
-				{
-					if (packetBuffer.StartsWith('#'))
-					{
-
-						return -1;
-					}
-
-					return -2;
-				}
-
-				return 1;
 			}
 
 			// @throw AL::Exception
 			// @return false on connection closed
-			bool WritePacket(const Packet& packet)
+			bool Update()
 			{
 				AL_ASSERT(
 					IsConnected(),
 					"Client not connected"
 				);
 
-				packetBuffer = packet.Encode();
+				Packet packet;
 
-				try
+				switch (ReadPacket(packet))
 				{
-					if (!lpConnection->WriteLine(packetBuffer))
-					{
-						Disconnect();
+					case 0:  return false;
+					case -1: return true;
+					case -2: return true;
+				}
 
-						return false;
+				if (OnReadPacket(packet))
+				{
+					OnReceivePacket.Execute(packet);
+
+					if (packet.IsMessage())
+					{
+						Message message;
+
+						if (Message::Decode(message, packet) && OnReadMessage(packet, message))
+						{
+							AL::Regex::MatchCollection matches;
+
+							if (AL::Regex::Match(matches, "^ack(.+)$", message.Content))
+							{
+								auto it = messageCallbacks.Find(matches[1]);
+
+								if (it != messageCallbacks.end())
+								{
+									ClientOnMessageSentCallback callback;
+									it->Value.Dequeue(callback);
+
+									if (it->Value.GetSize() == 0)
+										messageCallbacks.Erase(it);
+
+									callback();
+
+									return true;
+								}
+							}
+
+							OnReceiveMessage.Execute(packet, message);
+
+							return true;
+						}
+					}
+					else if (packet.IsPosition())
+					{
+						Position position;
+
+						if (Position::Decode(position, packet) && OnReadPosition(packet, position))
+						{
+							OnReceivePosition.Execute(packet, position);
+
+							return true;
+						}
 					}
 				}
-				catch (AL::Exception& exception)
+
+				return true;
+			}
+
+			// Note: This bypasses automatic ack handling
+			// @throw AL::Exception
+			// @return false on connection closed
+			bool SendPacket(const Packet& value)
+			{
+				AL_ASSERT(
+					IsConnected(),
+					"Client not connected"
+				);
+
+				return WritePacket(value);
+			}
+
+			// @throw AL::Exception
+			// @return false on connection closed
+			bool SendMessage(const Message& value, const AL::String& tocall, const AL::String& path)
+			{
+				AL_ASSERT(
+					IsConnected(),
+					"Client not connected"
+				);
+
+				return WritePacket(value.Encode(tocall, GetCallsign(), path));
+			}
+			// @throw AL::Exception
+			// @return false on connection closed
+			bool SendMessage(const Message& value, const AL::String& tocall, const AL::String& path, ClientOnMessageSentCallback&& callback)
+			{
+				AL_ASSERT(
+					IsConnected(),
+					"Client not connected"
+				);
+
+				if (!WritePacket(value.Encode(tocall, GetCallsign(), path)))
 				{
 
-					throw AL::Exception(
-						AL::Move(exception),
-						"Error sending Packet [Buffer: %s]",
-						packetBuffer.GetCString()
-					);
+					return false;
 				}
 
+				if (value.Ack.GetLength() == 0)
+					callback();
+				else
+					messageCallbacks[value.Ack].Enqueue(AL::Move(callback));
+
+				return true;
+			}
+
+			// @throw AL::Exception
+			// @return false on connection closed
+			bool SendPosition(const Position& value, const AL::String& tocall, const AL::String& path)
+			{
+				AL_ASSERT(
+					IsConnected(),
+					"Client not connected"
+				);
+
+				return WritePacket(value.Encode(tocall, GetCallsign(), path));
+			}
+
+		protected:
+			// @throw AL::Exception
+			// @return false to stop processing
+			virtual bool OnReadPacket(const Packet& packet)
+			{
+				return true;
+			}
+
+			// @throw AL::Exception
+			// @return false to stop processing
+			virtual bool OnReadMessage(const Packet& packet, const Message& message)
+			{
+				return true;
+			}
+
+			// @throw AL::Exception
+			// @return false to stop processing
+			virtual bool OnReadPosition(const Packet& packet, const Position& position)
+			{
 				return true;
 			}
 
@@ -762,19 +831,203 @@ namespace APRS
 
 				return false;
 			}
-		};
-
-		class TcpClient
-			: public Client<Connections::TcpConnection>
-		{
-		public:
-			using Client<Connections::TcpConnection>::Client;
 
 			// @throw AL::Exception
-			void Connect(const AL::Network::IPEndPoint& remoteEP)
+			// @return 0 on connection closed
+			// @return -1 if would block
+			// @return -2 on decoding error
+			int ReadPacket(Packet& packet)
 			{
-				Client::Connect(remoteEP);
+				try
+				{
+					switch (lpConnection->ReadLine(packetBuffer, false))
+					{
+						case 0:
+							Disconnect();
+							return 0;
+
+						case -1:
+							return -1;
+					}
+				}
+				catch (AL::Exception& exception)
+				{
+
+					throw AL::Exception(
+						AL::Move(exception),
+						"Error receiving packet buffer"
+					);
+				}
+
+				if (!Packet::Decode(packet, packetBuffer))
+				{
+					if (packetBuffer.StartsWith('#'))
+					{
+
+						return -1;
+					}
+
+					return -2;
+				}
+
+				return 1;
 			}
+
+			// @throw AL::Exception
+			// @return false on connection closed
+			bool WritePacket(const Packet& packet)
+			{
+				packetBuffer = packet.Encode();
+
+				try
+				{
+					if (!lpConnection->WriteLine(packetBuffer))
+					{
+						Disconnect();
+
+						return false;
+					}
+				}
+				catch (AL::Exception& exception)
+				{
+
+					throw AL::Exception(
+						AL::Move(exception),
+						"Error sending Packet [Buffer: %s]",
+						packetBuffer.GetCString()
+					);
+				}
+
+				return true;
+			}
+		};
+
+		typedef AL::Collections::Array<AL::String> GatewayCommandFilter;
+
+		// @throw AL::Exception
+		// @return false if not handled
+		typedef AL::Function<bool(const AL::String& sender, const AL::String& prefix, const AL::String& args)> GatewayCommandHandler;
+
+		class Gateway
+			: public Client
+		{
+			struct _CommandContext
+			{
+				bool                  IsFilterInverted = false;
+
+				AL::String            Prefix;
+				GatewayCommandFilter  Filter;
+				GatewayCommandHandler Handler;
+			};
+
+			AL::Collections::LinkedList<_CommandContext> commands;
+
+		public:
+			using Client::Client;
+
+			void RegisterCommand(const AL::String& prefix, GatewayCommandHandler&& handler)
+			{
+				RegisterCommand(prefix, AL::Move(handler), GatewayCommandFilter());
+			}
+			void RegisterCommand(const AL::String& prefix, GatewayCommandHandler&& handler, GatewayCommandFilter&& filter, bool invert_filter = false)
+			{
+				for (auto& command : commands)
+				{
+					if (command.Prefix.Compare(prefix, AL::True))
+					{
+						command.IsFilterInverted = invert_filter;
+						command.Filter  = AL::Move(filter);
+						command.Handler = AL::Move(handler);
+
+						return;
+					}
+				}
+
+				commands.PushBack(
+					{
+						.IsFilterInverted = invert_filter,
+						.Prefix           = prefix,
+						.Filter           = AL::Move(filter),
+						.Handler          = AL::Move(handler)
+					}
+				);
+			}
+
+			// @throw AL::Exception
+			// @return 0 if not registered
+			// @return -1 if not handled
+			// @return -2 if rejected by filter
+			int ExecuteCommand(const AL::String& sender, const AL::String& prefix, const AL::String& args)
+			{
+				for (auto& command : commands)
+				{
+					if (command.Prefix.Compare(prefix, AL::True))
+					{
+						for (auto& filter : command.Filter)
+						{
+							if (filter.Compare(sender, AL::True))
+							{
+
+								return -2;
+							}
+						}
+
+						if (!command.Handler(sender, prefix, args))
+						{
+
+							return -1;
+						}
+
+						return 1;
+					}
+				}
+
+				return 0;
+			}
+
+		protected:
+			// @throw AL::Exception
+			// @return false to stop processing
+			// virtual bool OnReadPacket(const Packet& packet) override
+			// {
+			// 	if (!Client::OnReadPacket(packet))
+			// 		return false;
+
+			// 	return true;
+			// }
+
+			// @throw AL::Exception
+			// @return false to stop processing
+			virtual bool OnReadMessage(const Packet& packet, const Message& message) override
+			{
+				if (!Client::OnReadMessage(packet, message))
+					return false;
+
+				AL::Regex::MatchCollection matches;
+
+				if (AL::Regex::Match(matches, "^([^ ]+) ?(.+)?$", message.Content))
+				{
+					switch (ExecuteCommand(packet.Sender, matches[1], (matches.GetSize() == 3) ? matches[2] : ""))
+					{
+						case 0:  return true;
+						case -1: return true;
+						case -2: return false;
+						default: return false;
+					}
+				}
+
+				return true;
+			}
+
+			// @throw AL::Exception
+			// @return false to stop processing
+			// virtual bool OnReadPosition(const Packet& packet, const Position& position) override
+			// {
+			// 	if (!Client::OnReadPosition(packet, position))
+			// 		return false;
+
+			// 	return true;
+			// }
 		};
 	}
 }
