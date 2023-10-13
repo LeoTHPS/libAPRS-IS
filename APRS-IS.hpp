@@ -227,8 +227,11 @@ namespace APRS
 				position.Altitude         = AL::FromString<AL::int16>(matches[13]);
 				position.Comment          = AL::Move(matches[14]);
 
-				position.Latitude  = latitude_hours + (latitude_minutes / 60.0f) + (latitude_seconds / 3600.0f);
-				position.Longitude = longitude_hours + (longitude_minutes / 60.0f) + (longitude_seconds / 3600.0f);
+				// position.Latitude  = latitude_hours + (latitude_minutes / 60.0f) + (latitude_seconds / 3600.0f);
+				// position.Longitude = longitude_hours + (longitude_minutes / 60.0f) + (longitude_seconds / 3600.0f);
+
+				position.Latitude  = latitude_hours + (latitude_minutes / 60.0f) + (latitude_seconds / 6000.0f);
+				position.Longitude = longitude_hours + (longitude_minutes / 60.0f) + (longitude_seconds / 6000.0f);
 
 				if (latitude_north_south == 'S') position.Latitude  = -position.Latitude;
 				if (longitude_west_east  == 'W') position.Longitude = -position.Longitude;
@@ -761,6 +764,17 @@ namespace APRS
 			}
 		};
 
-		typedef Client<Connections::TcpConnection> TcpClient;
+		class TcpClient
+			: public Client<Connections::TcpConnection>
+		{
+		public:
+			using Client<Connections::TcpConnection>::Client;
+
+			// @throw AL::Exception
+			void Connect(const AL::Network::IPEndPoint& remoteEP)
+			{
+				Client::Connect(remoteEP);
+			}
+		};
 	}
 }
